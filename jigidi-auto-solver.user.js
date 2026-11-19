@@ -7,7 +7,7 @@
 // @match       https://www.jigidi.com/*/s/*
 // @grant       none
 // @run-at      document-start
-// @version     1.1
+// @version     1.2
 // @description Liest Position, Massstab und Groesse der Teile direkt aus Jigidis drawImage-Aufrufen und zieht die Teile per simulierten Mausevents an die richtige Position.
 // @license     MIT
 // @homepageURL https://github.com/smo0601-collab/Jigidi-Solver-automatic-Tampermonkey
@@ -22,27 +22,43 @@
 (function () {
     'use strict';
 
+    const VERSION = '1.2';
+    // Tempo-Profile. W = Wartezeiten (ms) beim Greifen: Hover1, Hover2, Hover3, nach Klick, nach erstem Move.
+    // HOLD_MS = am Ziel kurz halten (Jigidi zieht dem Zeiger hinterher), SETTLE_MS = Wartezeit nach dem Loslassen.
+    const PRESETS = {
+        normal:  { DRAG_STEPS: 10, FRAME_MS: 10, SETTLE_MS: 200, HOLD_MS: 120, W: [25, 25, 70, 50, 25] },
+        schnell: { DRAG_STEPS: 6,  FRAME_MS: 6,  SETTLE_MS: 100, HOLD_MS: 60,  W: [12, 12, 35, 25, 12] },
+        maximal: { DRAG_STEPS: 4,  FRAME_MS: 4,  SETTLE_MS: 60,  HOLD_MS: 30,  W: [6, 6, 20, 15, 6] }
+    };
     const CFG = {
-        DRAG_STEPS: 10,
-        FRAME_MS: 10,
-        SETTLE_MS: 200,
-        HOLD_MS: 120,     // am Ziel kurz halten, Jigidi zieht dem Zeiger hinterher
         ROUNDS: 3,
         TRIES: 3,         // Versuche pro Teil und Runde
-        TOL: 0.2          // erlaubter Abstand zum Ziel in Teilebreiten
+        TOL: 0.2,         // erlaubter Abstand zum Ziel in Teilebreiten
+        SPEED: 'schnell'
     };
 
     const log = (...a) => console.log('[AutoSolver]', ...a);
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // Sichtbares Protokoll im Panel (wird in start() verdrahtet)
+    // Protokoll: Zeitstempel (Sekunden seit Scriptstart), Panel-Anzeige, Konsole und Datei-Download
+    const T0 = Date.now();
+    const logLines = [];
     let traceFn = () => {};
-    const trace = t => { log(t); traceFn(t); };
+    const trace = t => {
+        const line = `[${((Date.now() - T0) / 1000).toFixed(1).padStart(6)}s] ${t}`;
+        logLines.push(line);
+        console.log('[AutoSolver]', line);
+        traceFn(line);
+    };
 
     const store = {
         get(k, d) { try { const v = localStorage.getItem('jas_' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
         set(k, v) { try { localStorage.setItem('jas_' + k, JSON.stringify(v)); } catch (e) { /* ignore */ } }
     };
+
+    CFG.SPEED = store.get('speed', 'schnell');
+    if (!PRESETS[CFG.SPEED]) CFG.SPEED = 'schnell';
+    Object.assign(CFG, PRESETS[CFG.SPEED]);
 
     // ---------- Aufzeichnung (Hook, so frueh wie moeglich, nur im Auto-Modus) ----------
     // sizes: Groesse jedes putImageData-Aufrufs, Index = Teil-Nummer in Loesungsreihenfolge
@@ -119,15 +135,15 @@
     async function drag(cv, from, to) {
         // Wie ein Mensch: erst ueber das Teil fahren (Jigidi bestimmt das Teil im mousemove), dann klicken
         fire(cv, 'move', from.x - 30, from.y - 20, 0);
-        await sleep(25);
+        await sleep(CFG.W[0]);
         fire(cv, 'move', from.x - 10, from.y - 6, 0);
-        await sleep(25);
+        await sleep(CFG.W[1]);
         fire(cv, 'move', from.x, from.y, 0);
-        await sleep(70);
+        await sleep(CFG.W[2]);
         fire(cv, 'down', from.x, from.y, 1);
-        await sleep(50);
+        await sleep(CFG.W[3]);
         fire(cv, 'move', from.x + 3, from.y + 2, 1);
-        await sleep(25);
+        await sleep(CFG.W[4]);
         for (let s = 1; s <= CFG.DRAG_STEPS; s++) {
             const t = s / CFG.DRAG_STEPS;
             fire(cv, 'move', from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, 1);
@@ -185,6 +201,7 @@
     // ---------- Loesen ----------
     async function run(cv, cols, rows, setStatus) {
         const N = cols * rows;
+        trace(`Auto Solver v${VERSION}, ${cols}x${rows} = ${N} Teile, Tempo "${CFG.SPEED}" ${JSON.stringify(PRESETS[CFG.SPEED])}`);
         if (typeof CanvasRenderingContext2D.prototype.getTransform !== 'function') throw new Error('Browser unterstuetzt getTransform nicht.');
 
         // 1) Jigidi muss genau N Teile erzeugen, sonst stimmt die Zuordnung Teil -> Position nicht
@@ -237,6 +254,8 @@
             (Math.abs(a % cols - ac) + Math.abs(Math.floor(a / cols) - ar)) -
             (Math.abs(b % cols - ac) + Math.abs(Math.floor(b / cols) - ar)));
 
+        const stats = { ms: 0, moved: 0, retries: 0, miss: 0 };
+        const tStart = Date.now();
         let placed = 0;
         for (let round = 1; round <= CFG.ROUNDS; round++) {
             placed = 1;
@@ -247,15 +266,52 @@
                 const p = rec.pieces.get(id);
                 if (Math.hypot(p.x - tx, p.y - ty) < CFG.TOL * pitch) { placed++; continue; }
 
+                const tp = Date.now();
                 const res = await movePiece(cv, id, tx, ty, pitch);
-                if (res.ok) placed++;
-                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} -> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x) ${res.ok ? 'OK' : 'daneben'}`);
+                const ms = Date.now() - tp;
+                stats.ms += ms; stats.moved++; stats.retries += res.tries - 1;
+                if (res.ok) placed++; else stats.miss++;
+                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} -> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x, ${ms}ms) ${res.ok ? 'OK' : 'daneben'}`);
                 setStatus(`Runde ${round}/${CFG.ROUNDS}: ${placed}/${N} platziert`);
             }
             trace(`Runde ${round}: ${placed}/${N} platziert`);
             if (placed >= N) break;
         }
+        trace(`Zusammenfassung: ${placed}/${N} platziert in ${((Date.now() - tStart) / 1000).toFixed(1)}s, ` +
+            `${stats.moved} Zuege (${stats.moved ? (stats.ms / stats.moved).toFixed(0) : 0}ms pro Zug), ` +
+            `${stats.retries} Wiederholungen, ${stats.miss} daneben`);
         return placed;
+    }
+
+    // ---------- Protokolldatei ----------
+    function buildLog(reason) {
+        return [
+            `Jigidi Auto Solver v${VERSION} - Protokoll (${reason})`,
+            `Zeit: ${new Date().toISOString()}`,
+            `Seite: ${location.href}`,
+            `Browser: ${navigator.userAgent}`,
+            `Einstellungen: Tempo ${CFG.SPEED}, Runden ${CFG.ROUNDS}, Versuche ${CFG.TRIES}, Toleranz ${CFG.TOL}`,
+            ''
+        ].concat(logLines).join('\n') + '\n';
+    }
+
+    function download(text) {
+        const d = new Date(), z = n => String(n).padStart(2, '0');
+        const name = `jigidi-protokoll-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}.txt`;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+        return name;
+    }
+
+    function saveLog(reason) {
+        const text = logLines.length ? buildLog(reason) : store.get('lastlog', '');
+        if (!text) return null;
+        if (logLines.length) store.set('lastlog', text);
+        return download(text);
     }
 
     // ---------- UI + Start ----------
@@ -275,10 +331,18 @@
             <strong>Auto Solver (experimentell)</strong>
             <div style="display:flex;gap:.5rem;align-items:center;margin:.5rem 0;">
                 <button class="btn em" id="jas-go"><span style="font-weight:bold;cursor:pointer;">Auto-Solve</span></button>
+                <label style="font-size:.85rem;">Tempo
+                    <select id="jas-speed" style="color:black;">
+                        <option value="normal">normal</option>
+                        <option value="schnell">schnell</option>
+                        <option value="maximal">maximal</option>
+                    </select>
+                </label>
                 <label style="font-size:.85rem;">Raster px (0=auto)
                     <input id="jas-pitch" type="number" min="0" value="${store.get('pitch', 0)}" style="width:5rem;color:black;">
                 </label>
             </div>
+            <button class="btn" id="jas-save" style="margin-bottom:.5rem;">Protokoll speichern (.txt)</button>
             <div id="jas-status" style="font-size:.85rem;"></div>
             <pre id="jas-log" title="Klick = alles markieren" style="font-size:.7rem;max-height:14rem;overflow:auto;white-space:pre-wrap;user-select:all;margin:.5rem 0;"></pre>
             <hr>`;
@@ -287,10 +351,16 @@
         const setStatus = t => { status.textContent = t; };
         const logBox = document.getElementById('jas-log');
         const lines = [];
-        traceFn = t => { lines.push(t); logBox.textContent = lines.join('\n'); logBox.scrollTop = logBox.scrollHeight; };
+        traceFn = t => { lines.push(t); logBox.textContent += t + '\n'; logBox.scrollTop = logBox.scrollHeight; };
+        document.getElementById('jas-speed').value = CFG.SPEED;
+        document.getElementById('jas-save').addEventListener('click', () => {
+            const n = saveLog('manuell');
+            setStatus(n ? `Protokoll gespeichert: ${n}` : 'Noch kein Protokoll vorhanden.');
+        });
 
         document.getElementById('jas-go').addEventListener('click', () => {
             store.set('pitch', parseFloat(document.getElementById('jas-pitch').value) || 0);
+            store.set('speed', document.getElementById('jas-speed').value);
             store.set('run', true);
             window.location.reload();
         });
@@ -309,10 +379,14 @@
                 if (!cv) throw new Error('Kein Canvas gefunden.');
                 const placed = await run(cv, cols, rows, setStatus);
                 const bodyCls = (document.getElementById('body') || document.body).className.replace(/\s+/g, ' ');
-                setStatus(`Fertig: ${placed}/${N} Teile platziert. Spielstatus: ${bodyCls}.`);
+                trace(`Fertig: ${placed}/${N} Teile platziert. Spielstatus: ${bodyCls}.`);
+                const fn = saveLog('fertig');
+                setStatus(`Fertig: ${placed}/${N} Teile platziert. Spielstatus: ${bodyCls}.${fn ? ' Protokoll: ' + fn : ''}`);
             } catch (e) {
                 console.error('[AutoSolver]', e);
-                setStatus('Fehler: ' + e.message);
+                trace('FEHLER: ' + e.message);
+                const fn = saveLog('fehler');
+                setStatus('Fehler: ' + e.message + (fn ? ' (Protokoll: ' + fn + ')' : ''));
             }
         })();
     }

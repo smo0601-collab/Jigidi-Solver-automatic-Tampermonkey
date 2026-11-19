@@ -2,7 +2,7 @@
 
 Experimentelles Userscript, das ein [Jigidi](https://www.jigidi.com)-Puzzle automatisch löst: Es liest aus Jigidis eigenen Zeichenaufrufen, welches Teil wo liegt, und zieht jedes Teil per simulierter Maus an seine richtige Position.
 
-> **Status: experimentell.** Version 1.0 wurde an einem 12-Teile-Puzzle erfolgreich getestet. Die aktuelle Version 1.1 (Zuordnung bei gleich großen Teilen, kürzere Wartezeiten) ist noch nicht an einem größeren Puzzle bestätigt. Jigidi kann sein Verhalten jederzeit ändern, dann muss das Script angepasst werden.
+> **Status: experimentell.** Getestet: Version 1.0 an einem 12-Teile-Puzzle, Version 1.1 an einem Puzzle mit 246 Teilen (funktioniert, war aber langsam). Version 1.2 bringt wählbare Tempo-Stufen und eine Protokolldatei. Jigidi kann sein Verhalten jederzeit ändern, dann muss das Script angepasst werden.
 
 ## Installation
 
@@ -16,7 +16,10 @@ Experimentelles Userscript, das ein [Jigidi](https://www.jigidi.com)-Puzzle auto
 1. Ein Puzzle bei Jigidi öffnen.
 2. Im Seitenpanel unter den Puzzle-Infos erscheint der Block **Auto Solver**.
 3. Auf **Auto-Solve** klicken. Die Seite lädt neu, das Script wartet auf den Spielstart und beginnt zu ziehen.
-4. Fortschritt: Statuszeile und ein Protokollfeld unter dem Button. Pro Teil steht dort Start, Ziel, tatsächliche Landeposition und der Fehler in Pixeln.
+4. Fortschritt: Statuszeile und ein Protokollfeld unter dem Button. Pro Teil steht dort Start, Ziel, tatsächliche Landeposition, Fehler in Pixeln und die Dauer in ms.
+5. Am Ende (oder bei einem Fehler) wird automatisch eine **Protokolldatei** `jigidi-protokoll-<Datum>-<Zeit>.txt` heruntergeladen. Mit dem Button **Protokoll speichern** geht das auch jederzeit von Hand, auch nach einem Neuladen (das letzte Protokoll wird im Browser gemerkt).
+
+**Tempo:** `normal`, `schnell` (Standard) oder `maximal` bestimmen die Wartezeiten pro Zug. Bei großen Puzzles (getestet mit 246 Teilen) spart `schnell` oder `maximal` viel Zeit. Wenn viele Teile als `daneben` im Protokoll stehen oder oft wiederholt werden, auf eine langsamere Stufe zurückgehen.
 
 Das Feld „Raster px“ ist optional. `0` bedeutet automatisch. Nur wenn die Teile nicht einrasten, kann man dort die Zellgröße auf dem Bildschirm von Hand eintragen.
 
