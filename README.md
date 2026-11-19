@@ -2,7 +2,7 @@
 
 Experimentelles Userscript, das ein [Jigidi](https://www.jigidi.com)-Puzzle automatisch löst: Es liest aus Jigidis eigenen Zeichenaufrufen, welches Teil wo liegt, und zieht jedes Teil per simulierter Maus an seine richtige Position.
 
-> **Status: experimentell.** Getestet: Version 1.0 an einem 12-Teile-Puzzle, Version 1.1 an einem Puzzle mit 246 Teilen und Version 1.2 an 208 Teilen (funktioniert, war aber mit rund 1,7 s pro Teil langsam). Version 1.2 brachte wählbare Tempo-Stufen und eine Protokolldatei, Version 1.3 einen Stop-Button, Version 1.4 bildbasierte Wartezeiten (deutlich schneller bei großen Puzzles). Jigidi kann sein Verhalten jederzeit ändern, dann muss das Script angepasst werden.
+> **Status: experimentell.** Getestet: Version 1.0 an einem 12-Teile-Puzzle, Version 1.1 an einem Puzzle mit 246 Teilen und Version 1.2 an 208 Teilen (funktioniert, war aber mit rund 1,7 s pro Teil langsam) und Version 1.4 an 588 Teilen (Genauigkeit 0 bis 1 px, rund 0,77 s pro Teil). Version 1.2 brachte wählbare Tempo-Stufen und eine Protokolldatei, Version 1.3 einen Stop-Button, Version 1.4 bildbasierte Wartezeiten, Version 1.5 Prüfung erst am Rundenende (deutlich schneller bei großen Puzzles). Jigidi kann sein Verhalten jederzeit ändern, dann muss das Script angepasst werden.
 
 ## Installation
 
@@ -21,7 +21,9 @@ Experimentelles Userscript, das ein [Jigidi](https://www.jigidi.com)-Puzzle auto
 
 **Stoppen:** Während des Laufs bricht der Button **Stop (Esc)** oder die Esc-Taste ab. Das Script lässt dabei die Maustaste los, speichert das Protokoll und zeigt „Gestoppt“. Ein neuer Lauf startet wieder über **Auto-Solve**.
 
-**Tempo:** `normal`, `schnell` (Standard) oder `maximal` bestimmen, wie viele Wartepunkte (in Bildern, nicht in Millisekunden) pro Zug eingebaut sind. Bei großen Puzzles zeichnet Jigidi sehr langsam, dann kostet jeder Wartepunkt etwa ein Bild. Nach dem Loslassen wird nicht mehr fest gewartet, sondern nur, bis das Teil am Ziel angekommen ist. Wenn viele Teile als `daneben` im Protokoll stehen oder oft wiederholt werden, auf eine langsamere Stufe zurückgehen.
+**Tempo:**
+- `normal`: nach **jedem** Teil wird gewartet und die Position geprüft (sicher, aber langsam: Jigidi lässt losgelassene Teile etwa 0,65 s einrasten, das summiert sich).
+- `schnell` (Standard) und `maximal`: sofort mit dem nächsten Teil weitermachen, geprüft wird erst **am Ende jeder Runde**. Teile, die danebenliegen, werden in der nächsten Runde neu gezogen. Bei 588 Teilen war ein Zug bei `maximal` rund 0,13 s statt 0,77 s lang (Messung der Zugdauer, die Einrastzeit kam bei der alten Variante noch dazu).
 
 Das Feld „Raster px“ ist optional. `0` bedeutet automatisch. Nur wenn die Teile nicht einrasten, kann man dort die Zellgröße auf dem Bildschirm von Hand eintragen.
 

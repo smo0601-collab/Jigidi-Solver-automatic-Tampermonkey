@@ -7,7 +7,7 @@
 // @match       https://www.jigidi.com/*/s/*
 // @grant       none
 // @run-at      document-start
-// @version     1.4
+// @version     1.5
 // @description Liest Position, Massstab und Groesse der Teile direkt aus Jigidis drawImage-Aufrufen und zieht die Teile per simulierten Mausevents an die richtige Position.
 // @license     MIT
 // @homepageURL https://github.com/smo0601-collab/Jigidi-Solver-automatic-Tampermonkey
@@ -22,16 +22,17 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.4';
-    // Tempo-Profile, Wartezeiten in BILDERN (Frames) statt Millisekunden: Auf einer ausgelasteten Seite (viele Teile)
-    // verspaetet sich jeder Timer um ein Bild, entscheidend ist also die Anzahl der Wartepunkte.
+    const VERSION = '1.5';
+    // Tempo-Profile, Wartezeiten in BILDERN (Frames) statt Millisekunden.
     // HOVER = Bilder ueber dem Teil vor dem Klick, DOWN = Bilder nach dem Klick, STEPS = Zwischenschritte beim Ziehen,
-    // HOLD = Bilder am Ziel halten (Jigidi zieht dem Zeiger hinterher), SETTLE = maximale Bilder nach dem Loslassen
-    // (das Warten endet frueher, sobald das Teil am Ziel angekommen ist).
+    // HOLD = Bilder am Ziel halten, SETTLE = maximale Bilder Wartezeit nach dem Loslassen (nur mit VERIFY).
+    // VERIFY = true: nach JEDEM Teil warten und die Position pruefen (sicher, aber langsam: Jigidi laesst die Teile
+    //          nach dem Loslassen ca. 0,65 s einrasten). false: sofort mit dem naechsten Teil weitermachen und
+    //          erst am Ende jeder Runde pruefen. Teile, die danebenliegen, werden in der naechsten Runde neu gezogen.
     const PRESETS = {
-        normal:  { HOVER: 2, DOWN: 2, STEPS: 8, HOLD: 4, SETTLE: 12 },
-        schnell: { HOVER: 1, DOWN: 1, STEPS: 4, HOLD: 2, SETTLE: 8 },
-        maximal: { HOVER: 1, DOWN: 1, STEPS: 2, HOLD: 1, SETTLE: 6 }
+        normal:  { HOVER: 2, DOWN: 2, STEPS: 8, HOLD: 4, SETTLE: 12, VERIFY: true },
+        schnell: { HOVER: 1, DOWN: 1, STEPS: 4, HOLD: 2, SETTLE: 8,  VERIFY: false },
+        maximal: { HOVER: 1, DOWN: 1, STEPS: 2, HOLD: 1, SETTLE: 6,  VERIFY: false }
     };
     const CFG = {
         ROUNDS: 3,
@@ -217,7 +218,16 @@
     }
 
     // Zieht Teil id so, dass seine Zellmitte auf (tx, ty) landet; prueft das Ergebnis und versucht es erneut
-    async function movePiece(cv, id, tx, ty, pitch) {
+    async function movePiece(cv, id, tx, ty, pitch, verify = CFG.VERIFY) {
+        if (!verify) {
+            // Ohne Pruefung: ziehen, ein Bild warten, sofort weiter (Kontrolle am Rundenende)
+            const p0 = rec.pieces.get(id);
+            const g0 = pickPoint(id, pitch / 2);
+            const t0 = Date.now();
+            await drag(cv, g0, { x: g0.x + (tx - p0.x), y: g0.y + (ty - p0.y) });
+            await frame();
+            return { ok: null, q: null, err: NaN, tries: 1, tDrag: Date.now() - t0, tSet: 0 };
+        }
         let q = null, err = Infinity, tries = 0, tDrag = 0, tSet = 0;
         for (; tries < CFG.TRIES; tries++) {
             const p = rec.pieces.get(id);
@@ -280,7 +290,7 @@
 
         setStatus('Setze Ankerteil ...');
         const a0 = rec.pieces.get(aId);
-        const ra = await movePiece(cv, aId, ax, ay, pitch);
+        const ra = await movePiece(cv, aId, ax, ay, pitch, true);
         trace(`Anker ${aId}: war ${a0.x.toFixed(0)},${a0.y.toFixed(0)} -> ${ra.q.x.toFixed(0)},${ra.q.y.toFixed(0)} (Ziel ${ax.toFixed(0)},${ay.toFixed(0)}, Versuche ${ra.tries})`);
         trace(`Bilddauer auf dieser Seite im Schnitt ${perf.frames ? (perf.ms / perf.frames).toFixed(0) : '?'}ms (Ankerzug: Ziehen ${ra.tDrag}ms + Setzen ${ra.tSet}ms)`);
 
@@ -290,27 +300,57 @@
             (Math.abs(a % cols - ac) + Math.abs(Math.floor(a / cols) - ar)) -
             (Math.abs(b % cols - ac) + Math.abs(Math.floor(b / cols) - ar)));
 
+        // Wartet, bis sich keine Teilposition mehr aendert (Jigidi laesst losgelassene Teile noch einrasten)
+        const quiet = async (maxMs = 4000) => {
+            const sig = () => { let v = 0; for (const q of rec.pieces.values()) v += q.x * 3 + q.y; return v; };
+            let last = sig();
+            const t0 = Date.now();
+            for (;;) {
+                await sleep(300);
+                const cur = sig();
+                if (Math.abs(cur - last) < 0.5 || Date.now() - t0 > maxMs) return;
+                last = cur;
+            }
+        };
+        const countPlaced = () => {
+            const A = rec.pieces.get(aId);
+            let n = 1;
+            for (const id of order) {
+                const q = rec.pieces.get(id);
+                const tx = A.x + (id % cols - ac) * pitch, ty = A.y + (Math.floor(id / cols) - ar) * pitch;
+                if (q && Math.hypot(q.x - tx, q.y - ty) < CFG.TOL * pitch) n++;
+            }
+            return n;
+        };
+
         const stats = { ms: 0, moved: 0, retries: 0, miss: 0 };
         const tStart = Date.now();
         let placed = 0;
         for (let round = 1; round <= CFG.ROUNDS; round++) {
-            placed = 1;
+            let moved = 0;
             for (const id of order) {
                 const c = id % cols, r = Math.floor(id / cols);
                 const A = rec.pieces.get(aId);
                 const tx = A.x + (c - ac) * pitch, ty = A.y + (r - ar) * pitch;
                 const p = rec.pieces.get(id);
-                if (Math.hypot(p.x - tx, p.y - ty) < CFG.TOL * pitch) { placed++; continue; }
+                if (Math.hypot(p.x - tx, p.y - ty) < CFG.TOL * pitch) continue;
 
                 const tp = Date.now();
                 const res = await movePiece(cv, id, tx, ty, pitch);
                 const ms = Date.now() - tp;
-                stats.ms += ms; stats.moved++; stats.retries += res.tries - 1;
-                if (res.ok) placed++; else stats.miss++;
-                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} -> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x, ${ms}ms = Ziehen ${res.tDrag} + Setzen ${res.tSet}) ${res.ok ? 'OK' : 'daneben'}`);
-                setStatus(`Runde ${round}/${CFG.ROUNDS}: ${placed}/${N} platziert`);
+                stats.ms += ms; stats.moved++; stats.retries += res.tries - 1; moved++;
+                if (res.ok === false) stats.miss++;
+                const tail = res.q
+                    ? `-> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x, ${ms}ms = Ziehen ${res.tDrag} + Setzen ${res.tSet}) ${res.ok ? 'OK' : 'daneben'}`
+                    : `(${ms}ms, Pruefung am Rundenende)`;
+                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} ${tail}`);
+                setStatus(`Runde ${round}/${CFG.ROUNDS}: ${moved} Teile bewegt`);
             }
-            trace(`Runde ${round}: ${placed}/${N} platziert`);
+            setStatus(`Runde ${round}/${CFG.ROUNDS}: warte, bis alle Teile eingerastet sind ...`);
+            await quiet();
+            placed = countPlaced();
+            trace(`Runde ${round}: ${placed}/${N} platziert (${moved} Teile in dieser Runde bewegt)`);
+            setStatus(`Runde ${round}/${CFG.ROUNDS}: ${placed}/${N} platziert`);
             if (placed >= N) break;
         }
         trace(`Zusammenfassung: ${placed}/${N} platziert in ${((Date.now() - tStart) / 1000).toFixed(1)}s, ` +
