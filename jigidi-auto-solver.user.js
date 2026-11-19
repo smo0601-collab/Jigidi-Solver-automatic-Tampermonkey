@@ -7,7 +7,7 @@
 // @match       https://www.jigidi.com/*/s/*
 // @grant       none
 // @run-at      document-start
-// @version     1.2
+// @version     1.3
 // @description Liest Position, Massstab und Groesse der Teile direkt aus Jigidis drawImage-Aufrufen und zieht die Teile per simulierten Mausevents an die richtige Position.
 // @license     MIT
 // @homepageURL https://github.com/smo0601-collab/Jigidi-Solver-automatic-Tampermonkey
@@ -22,7 +22,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.2';
+    const VERSION = '1.3';
     // Tempo-Profile. W = Wartezeiten (ms) beim Greifen: Hover1, Hover2, Hover3, nach Klick, nach erstem Move.
     // HOLD_MS = am Ziel kurz halten (Jigidi zieht dem Zeiger hinterher), SETTLE_MS = Wartezeit nach dem Loslassen.
     const PRESETS = {
@@ -38,7 +38,10 @@
     };
 
     const log = (...a) => console.log('[AutoSolver]', ...a);
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    // Stop: jede Wartezeit prueft das Flag und bricht per Exception ab (Button "Stop" oder Esc-Taste)
+    let stopRequested = false;
+    let held = null; // gerade gehaltenes Teil {cv, x, y}, wird beim Stoppen losgelassen
+    const sleep = ms => new Promise((resolve, reject) => setTimeout(() => stopRequested ? reject(new Error('STOP')) : resolve(), ms));
 
     // Protokoll: Zeitstempel (Sekunden seit Scriptstart), Panel-Anzeige, Konsole und Datei-Download
     const T0 = Date.now();
@@ -141,12 +144,15 @@
         fire(cv, 'move', from.x, from.y, 0);
         await sleep(CFG.W[2]);
         fire(cv, 'down', from.x, from.y, 1);
+        held = { cv, x: from.x, y: from.y };
         await sleep(CFG.W[3]);
         fire(cv, 'move', from.x + 3, from.y + 2, 1);
         await sleep(CFG.W[4]);
         for (let s = 1; s <= CFG.DRAG_STEPS; s++) {
             const t = s / CFG.DRAG_STEPS;
-            fire(cv, 'move', from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, 1);
+            const mx = from.x + (to.x - from.x) * t, my = from.y + (to.y - from.y) * t;
+            fire(cv, 'move', mx, my, 1);
+            held.x = mx; held.y = my;
             await sleep(CFG.FRAME_MS);
         }
         // Am Ziel kurz halten, damit das Teil dem Zeiger folgen kann
@@ -155,6 +161,7 @@
             await sleep(CFG.HOLD_MS / 3);
         }
         fire(cv, 'up', to.x, to.y, 0);
+        held = null;
     }
 
     // Wartet, bis das Teil nach jetzt neu gezeichnet wurde, und liefert seine aktuelle Position
@@ -342,7 +349,10 @@
                     <input id="jas-pitch" type="number" min="0" value="${store.get('pitch', 0)}" style="width:5rem;color:black;">
                 </label>
             </div>
-            <button class="btn" id="jas-save" style="margin-bottom:.5rem;">Protokoll speichern (.txt)</button>
+            <div style="display:flex;gap:.5rem;margin-bottom:.5rem;">
+                <button class="btn" id="jas-stop" disabled title="Stoppt den Lauf (auch mit der Esc-Taste)">Stop (Esc)</button>
+                <button class="btn" id="jas-save">Protokoll speichern (.txt)</button>
+            </div>
             <div id="jas-status" style="font-size:.85rem;"></div>
             <pre id="jas-log" title="Klick = alles markieren" style="font-size:.7rem;max-height:14rem;overflow:auto;white-space:pre-wrap;user-select:all;margin:.5rem 0;"></pre>
             <hr>`;
@@ -366,6 +376,18 @@
         });
 
         if (!state.active) return;
+
+        const stopBtn = document.getElementById('jas-stop');
+        stopBtn.disabled = false;
+        const requestStop = () => {
+            if (stopRequested) return;
+            stopRequested = true;
+            stopBtn.disabled = true;
+            setStatus('Stoppe ...');
+        };
+        stopBtn.addEventListener('click', requestStop);
+        window.addEventListener('keydown', e => { if (e.key === 'Escape') requestStop(); }, true);
+
         setStatus('Auto-Modus gestartet, suche Canvas ...');
         (async () => {
             try {
@@ -379,10 +401,20 @@
                 if (!cv) throw new Error('Kein Canvas gefunden.');
                 const placed = await run(cv, cols, rows, setStatus);
                 const bodyCls = (document.getElementById('body') || document.body).className.replace(/\s+/g, ' ');
+                stopBtn.disabled = true;
                 trace(`Fertig: ${placed}/${N} Teile platziert. Spielstatus: ${bodyCls}.`);
                 const fn = saveLog('fertig');
                 setStatus(`Fertig: ${placed}/${N} Teile platziert. Spielstatus: ${bodyCls}.${fn ? ' Protokoll: ' + fn : ''}`);
             } catch (e) {
+                // Falls mitten im Zug gestoppt wurde: Maustaste loslassen, damit Jigidi kein Teil festhaelt
+                if (held) { fire(held.cv, 'up', held.x, held.y, 0); held = null; }
+                stopBtn.disabled = true;
+                if (e.message === 'STOP') {
+                    trace('Vom Benutzer gestoppt.');
+                    const fn = saveLog('gestoppt');
+                    setStatus('Gestoppt.' + (fn ? ' Protokoll: ' + fn : '') + ' Zum erneuten Start auf Auto-Solve klicken.');
+                    return;
+                }
                 console.error('[AutoSolver]', e);
                 trace('FEHLER: ' + e.message);
                 const fn = saveLog('fehler');
