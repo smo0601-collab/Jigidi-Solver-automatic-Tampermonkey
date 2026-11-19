@@ -7,7 +7,7 @@
 // @match       https://www.jigidi.com/*/s/*
 // @grant       none
 // @run-at      document-start
-// @version     1.3
+// @version     1.4
 // @description Liest Position, Massstab und Groesse der Teile direkt aus Jigidis drawImage-Aufrufen und zieht die Teile per simulierten Mausevents an die richtige Position.
 // @license     MIT
 // @homepageURL https://github.com/smo0601-collab/Jigidi-Solver-automatic-Tampermonkey
@@ -22,13 +22,16 @@
 (function () {
     'use strict';
 
-    const VERSION = '1.3';
-    // Tempo-Profile. W = Wartezeiten (ms) beim Greifen: Hover1, Hover2, Hover3, nach Klick, nach erstem Move.
-    // HOLD_MS = am Ziel kurz halten (Jigidi zieht dem Zeiger hinterher), SETTLE_MS = Wartezeit nach dem Loslassen.
+    const VERSION = '1.4';
+    // Tempo-Profile, Wartezeiten in BILDERN (Frames) statt Millisekunden: Auf einer ausgelasteten Seite (viele Teile)
+    // verspaetet sich jeder Timer um ein Bild, entscheidend ist also die Anzahl der Wartepunkte.
+    // HOVER = Bilder ueber dem Teil vor dem Klick, DOWN = Bilder nach dem Klick, STEPS = Zwischenschritte beim Ziehen,
+    // HOLD = Bilder am Ziel halten (Jigidi zieht dem Zeiger hinterher), SETTLE = maximale Bilder nach dem Loslassen
+    // (das Warten endet frueher, sobald das Teil am Ziel angekommen ist).
     const PRESETS = {
-        normal:  { DRAG_STEPS: 10, FRAME_MS: 10, SETTLE_MS: 200, HOLD_MS: 120, W: [25, 25, 70, 50, 25] },
-        schnell: { DRAG_STEPS: 6,  FRAME_MS: 6,  SETTLE_MS: 100, HOLD_MS: 60,  W: [12, 12, 35, 25, 12] },
-        maximal: { DRAG_STEPS: 4,  FRAME_MS: 4,  SETTLE_MS: 60,  HOLD_MS: 30,  W: [6, 6, 20, 15, 6] }
+        normal:  { HOVER: 2, DOWN: 2, STEPS: 8, HOLD: 4, SETTLE: 12 },
+        schnell: { HOVER: 1, DOWN: 1, STEPS: 4, HOLD: 2, SETTLE: 8 },
+        maximal: { HOVER: 1, DOWN: 1, STEPS: 2, HOLD: 1, SETTLE: 6 }
     };
     const CFG = {
         ROUNDS: 3,
@@ -41,6 +44,21 @@
     // Stop: jede Wartezeit prueft das Flag und bricht per Exception ab (Button "Stop" oder Esc-Taste)
     let stopRequested = false;
     let held = null; // gerade gehaltenes Teil {cv, x, y}, wird beim Stoppen losgelassen
+    // Frame-Messung: wie lange dauert ein Bild auf dieser Seite? (steht im Protokoll)
+    const perf = { frames: 0, ms: 0 };
+    const frame = () => new Promise((resolve, reject) => {
+        const t = performance.now();
+        let done = false;
+        const fin = () => {
+            if (done) return;
+            done = true;
+            perf.frames++; perf.ms += performance.now() - t;
+            stopRequested ? reject(new Error('STOP')) : resolve();
+        };
+        requestAnimationFrame(fin);
+        setTimeout(fin, 150); // Rueckfall, falls der Tab im Hintergrund keine Bilder zeichnet
+    });
+    const frames = async n => { for (let i = 0; i < n; i++) await frame(); };
     const sleep = ms => new Promise((resolve, reject) => setTimeout(() => stopRequested ? reject(new Error('STOP')) : resolve(), ms));
 
     // Protokoll: Zeitstempel (Sekunden seit Scriptstart), Panel-Anzeige, Konsole und Datei-Download
@@ -138,27 +156,25 @@
     async function drag(cv, from, to) {
         // Wie ein Mensch: erst ueber das Teil fahren (Jigidi bestimmt das Teil im mousemove), dann klicken
         fire(cv, 'move', from.x - 30, from.y - 20, 0);
-        await sleep(CFG.W[0]);
         fire(cv, 'move', from.x - 10, from.y - 6, 0);
-        await sleep(CFG.W[1]);
         fire(cv, 'move', from.x, from.y, 0);
-        await sleep(CFG.W[2]);
+        await frames(CFG.HOVER);
         fire(cv, 'down', from.x, from.y, 1);
         held = { cv, x: from.x, y: from.y };
-        await sleep(CFG.W[3]);
+        await frames(CFG.DOWN);
         fire(cv, 'move', from.x + 3, from.y + 2, 1);
-        await sleep(CFG.W[4]);
-        for (let s = 1; s <= CFG.DRAG_STEPS; s++) {
-            const t = s / CFG.DRAG_STEPS;
+        await frame();
+        for (let s = 1; s <= CFG.STEPS; s++) {
+            const t = s / CFG.STEPS;
             const mx = from.x + (to.x - from.x) * t, my = from.y + (to.y - from.y) * t;
             fire(cv, 'move', mx, my, 1);
             held.x = mx; held.y = my;
-            await sleep(CFG.FRAME_MS);
+            await frame();
         }
         // Am Ziel kurz halten, damit das Teil dem Zeiger folgen kann
-        for (let k = 0; k < 3; k++) {
+        for (let k = 0; k < CFG.HOLD; k++) {
             fire(cv, 'move', to.x, to.y, 1);
-            await sleep(CFG.HOLD_MS / 3);
+            await frame();
         }
         fire(cv, 'up', to.x, to.y, 0);
         held = null;
@@ -170,9 +186,19 @@
         for (let i = 0; i < 40; i++) {
             const p = rec.pieces.get(id);
             if (p && p.t >= t0) return p;
-            await sleep(25);
+            await frame();
         }
         return rec.pieces.get(id);
+    }
+
+    // Nach dem Loslassen: hoechstens SETTLE Bilder warten, aber sofort weiter, sobald das Teil am Ziel ist
+    async function settle(id, tx, ty, pitch) {
+        let q = await fresh(id);
+        for (let i = 1; i < CFG.SETTLE; i++) {
+            if (q && Math.hypot(q.x - tx, q.y - ty) < CFG.TOL * pitch) break;
+            q = await fresh(id);
+        }
+        return q;
     }
 
     // Greifpunkt: Zellmitte, bei Verdeckung durch spaeter gezeichnete (obenliegende) Teile seitlich versetzt
@@ -192,17 +218,19 @@
 
     // Zieht Teil id so, dass seine Zellmitte auf (tx, ty) landet; prueft das Ergebnis und versucht es erneut
     async function movePiece(cv, id, tx, ty, pitch) {
-        let q = null, err = Infinity, tries = 0;
+        let q = null, err = Infinity, tries = 0, tDrag = 0, tSet = 0;
         for (; tries < CFG.TRIES; tries++) {
             const p = rec.pieces.get(id);
             const g = pickPoint(id, pitch / 2);
+            const t1 = Date.now();
             await drag(cv, g, { x: g.x + (tx - p.x), y: g.y + (ty - p.y) });
-            await sleep(CFG.SETTLE_MS);
-            q = await fresh(id);
+            const t2 = Date.now();
+            q = await settle(id, tx, ty, pitch);
+            tSet += Date.now() - t2; tDrag += t2 - t1;
             err = q ? Math.hypot(q.x - tx, q.y - ty) : Infinity;
             if (err < CFG.TOL * pitch) { tries++; break; }
         }
-        return { ok: err < CFG.TOL * pitch, q, err, tries };
+        return { ok: err < CFG.TOL * pitch, q, err, tries, tDrag, tSet };
     }
 
     // ---------- Loesen ----------
@@ -254,6 +282,7 @@
         const a0 = rec.pieces.get(aId);
         const ra = await movePiece(cv, aId, ax, ay, pitch);
         trace(`Anker ${aId}: war ${a0.x.toFixed(0)},${a0.y.toFixed(0)} -> ${ra.q.x.toFixed(0)},${ra.q.y.toFixed(0)} (Ziel ${ax.toFixed(0)},${ay.toFixed(0)}, Versuche ${ra.tries})`);
+        trace(`Bilddauer auf dieser Seite im Schnitt ${perf.frames ? (perf.ms / perf.frames).toFixed(0) : '?'}ms (Ankerzug: Ziehen ${ra.tDrag}ms + Setzen ${ra.tSet}ms)`);
 
         const order = [];
         for (let id = 0; id < N; id++) if (id !== aId) order.push(id);
@@ -278,7 +307,7 @@
                 const ms = Date.now() - tp;
                 stats.ms += ms; stats.moved++; stats.retries += res.tries - 1;
                 if (res.ok) placed++; else stats.miss++;
-                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} -> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x, ${ms}ms) ${res.ok ? 'OK' : 'daneben'}`);
+                trace(`R${round} Teil ${id} (Sp${c + 1}/Z${r + 1}): von ${p.x.toFixed(0)},${p.y.toFixed(0)} Ziel ${tx.toFixed(0)},${ty.toFixed(0)} -> ${res.q.x.toFixed(0)},${res.q.y.toFixed(0)} (Fehler ${res.err.toFixed(0)}px, ${res.tries}x, ${ms}ms = Ziehen ${res.tDrag} + Setzen ${res.tSet}) ${res.ok ? 'OK' : 'daneben'}`);
                 setStatus(`Runde ${round}/${CFG.ROUNDS}: ${placed}/${N} platziert`);
             }
             trace(`Runde ${round}: ${placed}/${N} platziert`);
@@ -286,7 +315,7 @@
         }
         trace(`Zusammenfassung: ${placed}/${N} platziert in ${((Date.now() - tStart) / 1000).toFixed(1)}s, ` +
             `${stats.moved} Zuege (${stats.moved ? (stats.ms / stats.moved).toFixed(0) : 0}ms pro Zug), ` +
-            `${stats.retries} Wiederholungen, ${stats.miss} daneben`);
+            `${stats.retries} Wiederholungen, ${stats.miss} daneben, Bilddauer im Schnitt ${perf.frames ? (perf.ms / perf.frames).toFixed(0) : '?'}ms (${perf.frames} Bilder)`);
         return placed;
     }
 
